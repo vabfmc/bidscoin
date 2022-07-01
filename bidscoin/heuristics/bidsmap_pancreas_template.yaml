@@ -1,0 +1,382 @@
+# --------------------------------------------------------------------------------
+# This is a bidsmap YAML file with the key-value mappings for the different BIDS
+# datatypes (anat, func, dwi, etc). The datatype attributes are the keys that map
+# onto the BIDS labels. The bidsmap data-structure should be 5 levels deep:
+#
+# dict       : dict     : list     : dict        : dict
+# dataformat : datatype : run-item : bidsmapping : mapping-data
+#
+# NB:
+# 1) Edit the bidsmap file to your needs before feeding it to bidscoiner.py
+# 2) (Institute) users may create their own bidsmap_[template].yaml or
+#    bidsmap_[sample].yaml file
+#
+# For more information, see: https://bidscoin.readthedocs.io
+# --------------------------------------------------------------------------------
+
+
+Options:
+# --------------------------------------------------------------------------------
+# General options and plugins
+# --------------------------------------------------------------------------------
+  bidscoin:
+    version: '3.6.3'              # BIDScoin version (should correspond with the version in ../bidscoin/version.txt)
+    bidsignore: extra_data/       # Semicolon-separated list of entries that are added to the .bidsignore file (for more info, see BIDS specifications), e.g. extra_data/;pet/;myfile.txt;yourfile.csv
+  plugins:                        # List of plugins with plugin-specific key-value pairs (that can be used by the plugin)
+    dcm2bidsmap: ~                # The default plugin that is used by the bidsmapper to map DICOM and PAR/REC source data
+    custom_pancreas:
+      path: module add mricrogl;
+      args: -b y -z y -i n        # Argument string that is passed to dcm2niix. Tip: SPM users may want to use '-z n' (which produces unzipped nifti's, see dcm2niix -h for more information)
+
+
+DICOM:
+# --------------------------------------------------------------------------------
+# DICOM key-value heuristics (DICOM fields that are mapped to the BIDS labels)
+# --------------------------------------------------------------------------------
+  subject: <<SourceFilePath>>     # <<SourceFilePath>> extracts the subject label from the source directory during bidscoiner runtime. A DICOM attribute can also be used as subject-label instead, e.g. <PatientID>
+  session: <<SourceFilePath>>     # <<SourceFilePath>> extracts the session label from the source directory during bidscoiner runtime. A DICOM attribute can also be used as session-label instead, e.g. <StudyID>
+
+  anat:       # ----------------------- All anatomical runs --------------------
+  - provenance: ~                 # The fullpath name of the DICOM file from which the attributes are read. Serves also as a look-up key to find a run in the bidsmap
+    filesystem: &fileattr         # This is an optional (stub) entry of filesystem matching (could be added to any run-item)
+      path: ~                     # File folder, e.g. ".*Parkinson.*" or ".*(phantom|bottle).*"
+      name: ~                     # File name, e.g. ".*fmap.*" or ".*(fmap|field.?map|B0.?map).*"
+      size: ~                     # File size, e.g. "2[4-6]\d MB" for matching files between 240-269 MB
+      nrfiles: ~                  # Number of files in the folder that match the above criteria, e.g. "5/d/d" for matching a number between 500-599
+    attributes: &anat_dicomattr   # An empty / non-matching reference dictionary that can be derefenced in other run-items of this data type
+      Modality: ~
+      ProtocolName: ~
+      SeriesDescription: ~
+      ImageType: ~
+      SequenceName: ~
+      SequenceVariant: ~ 
+      ScanningSequence: ~
+      MRAcquisitionType: ~
+      SliceThickness: ~ 
+      FlipAngle: ~
+      EchoNumbers: ~
+      EchoTime: ~
+      RepetitionTime: ~
+      PhaseEncodingDirection: ~
+    bids: &anat_dicoment_nonparametric  # See: schema/datatypes/anat.yaml
+      acq:   # This will be expanded by the bidsmapper (so the user can edit it)
+      ce: ~
+      rec: ~
+      run: <<1>>                  # This will be updated during bidscoiner runtime (as it depends on the already existing files)
+      part: ['', 'mag', 'phase', 'real', 'imag', 0]
+      suffix: T1w
+    meta:                         # This is an optional entry for meta-data that will be appended to the json sidecar files produced by dcm2niix
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i).*t1.*vibe.*dixon.*sag.*320.*(?:rep)?(?:[0-9])?.*w"  
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: water
+      vp: sag
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i).*t1.*vibe.*dixon.*sag.*320.*(?:rep)?(?:[0-9])?.*f" 
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: fat
+      vp: sag
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i).*t1.*vibe.*dixon.*sag.*320.*(?:rep)?(?:[0-9])?.*in"  
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: in
+      vp: sag
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i).*t1.*vibe.*dixon.*sag.*320.*(?:rep)?(?:[0-9])?.*opp"
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: out
+      vp: sag
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i).*t1.*vibe.*dixon.*sag.*320.*(?:rep)?(?:[0-9])?.*in"
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: in
+      vp: sag
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i).*t1.*dixon.*tra.*pre.*(?:rep)?(?:[0-9])?.*f"
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: fatpractice
+      vp: ax
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i).*t1.*dixon.*tra.*pre.*(?:rep)?(?:[0-9])?.*w"
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: waterpractice
+      vp: ax
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i).*t1.*dixon.*tra.*pre(?:rep)?(?:[0-9])?.*in"
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: inpractice
+      vp: ax
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i).*t1.*dixon.*tra.*pre(?:rep)?(?:[0-9])?.*opp"
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: outpractice
+      vp: ax
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i).*t1.*dixon.*tra.*iso.*320.*(?:REP)?(?:[0-9])?.*w"
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: water320
+      vp: ax
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i).*t1.*dixon.*tra.*iso.*320.*(?:REP)?(?:[0-9])?.*f"
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: fat320
+      vp: ax
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i).*t1.*dixon.*tra.*iso.*320.*(?:REP)?(?:[0-9])?.*in"
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: in320
+      vp: ax
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i).*t1.*dixon.*tra.*iso.*320.*(?:REP)?(?:[0-9])?.*opp"
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: out320
+      vp: ax
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i).*t1.*dixon.*tra.*iso.*256.*(?:REP)?(?:[0-9])?.*w"
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: water256
+      vp: ax
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i).*t1.*dixon.*tra.*iso.*256.*(?:REP)?(?:[0-9])?.*f"
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: fat256
+      vp: ax
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i).*t1.*dixon.*tra.*iso.*256.*(?:REP)?(?:[0-9])?.*in"
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: in256
+      vp: ax
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i).*t1.*dixon.*tra.*iso.*256.*(?:REP)?(?:[0-9])?.*opp"
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: out256
+      vp: ax
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i)(?!.*_fs_.*).*t2.*haste.*tra.*vand.*(?:-rep)?.*"
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: vandhaste
+      vp: ax
+      suffix: T2w
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i).*t1.*vibe.*tra.*vand.*(?:-rep)?.*"
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: vandvibe
+      vp: ax
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i).*t1.*fl2d.*tra.*320.*(?:-rep)?.*"
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: fl2d
+      vp: ax
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i).*t2.*blade.*fs.*tra.*mbh.*(?:-rep)?.*"
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: fatsatblade
+      vp: ax
+      suffix: T2w
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i).*t2.*blade.*fs.*cor.*mbh.*(?:-rep)?.*"
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: fatsatblade
+      vp: cor
+      suffix: T2w
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i)(?!.*_fs_.*).*t2.*haste.*tra.*mbh.*(?:-rep)?.*"
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: haste
+      vp: ax
+      suffix: T2w
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i)(?!.*_fs_.*).*t2.*haste.*cor.*mbh.*(?:-rep)?.*"
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: haste
+      vp: cor
+      suffix: T2w
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i).*t2.*haste.*fs.*cor.*mbh.*(?:-rep)?.*"
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: fatsathaste
+      vp: cor
+      suffix: T2w
+  - provenance: 
+    attributes:
+      <<: *anat_dicomattr
+      ImageType: "(?i).*norm.*"
+      SeriesDescription: "(?i).*t2.*haste.*fs.*tra.*mbh.*(?:-rep)?.*"
+    bids: 
+      <<: *anat_dicoment_nonparametric
+      acq: fatsathaste
+      vp: ax
+      suffix: T2w
+
+  func:       # ----------------------- All functional runs --------------------
+  perf:       # ----------------------- All perfusion runs ---------------------
+  dwi:        # ----------------------- All diffusion runs ---------------------
+  - provenance: ~
+    attributes: &dwi_parattr    # The first item with empty attributes will not match anything but is used by default when changing datatype in the bidseditor GUI -> suffix = dwi
+      Modality: ~
+      ProtocolName: ~
+      SeriesDescription: ~
+      ImageType: ~
+      SequenceName: ~
+      SequenceVariant: ~
+      ScanningSequence: ~
+      MRAcquisitionType: ~
+      SliceThickness: ~
+      FlipAngle: ~
+      EchoNumbers: ~
+      EchoTime: ~
+      RepetitionTime: ~
+      PhaseEncodingDirection: ~
+    bids: &dwi_parent_DWI               # See: schema/datatypes/dwi.yaml
+      acq: <protocol_name>
+      dir: ~
+      run:  <<1>>
+      part: ['', 'mag', 'phase', 'real', 'imag', 0]
+      suffix: dwi
+  - provenance:                        # Then catch the normal DWI runs
+    attributes:
+      <<: *dwi_parattr
+      SeriesDescription: "(?i).*ep2d.*diff.*b50.*800.*tra.*mbh.*trace.*(?:rep)?.*"
+    bids: 
+      <<: *dwi_parent_DWI
+      acq: b50b800
+      vp: ax
+      echo: <<1>>
+      suffix: TRACE 
+  fmap:       # ----------------------- All fieldmap runs ----------------------
+  pet:        # ----------------------- All PET runs ---------------------------
+  eeg:        # ----------------------- All EEG data ---------------------------
+  
+  extra_data: # ----------------------- All extra data -------------------------
+  - provenance: ~
+    attributes: &exclude_paratter
+      Modality: ~
+      ProtocolName: ~
+      SeriesDescription: ~
+      ImageType: ~
+      SequenceName: ~
+      SequenceVariant: ~
+      ScanningSequence: ~
+      MRAcquisitionType: ~
+      SliceThickness: ~
+      FlipAngle: ~
+      EchoNumbers: ~
+      EchoTime: ~
+      RepetitionTime: ~
+      PhaseEncodingDirection: ~
+    bids: &exclude_parent
+      acq: <ProtocolName>
+      inv: ~
+      ce: ~
+      task: ~
+      dir: ~
+      run:  <<1>>
+      mod: ~
+      part: ['', 'mag', 'phase', 'real', 'imag', 0]
+  - provenance: ~
+    attributes:
+      <<: *exclude_paratter
+      SeriesDescription: '.*'
+    bids:
+      <<: *exclude_parent
+      suffix: exclude
