@@ -12,6 +12,8 @@ import logging
 import tempfile
 import tarfile
 import zipfile
+import json
+import shutil
 from functools import lru_cache
 from pydicom import dcmread, fileset, datadict
 from nibabel.parrec import parse_PAR_header
@@ -27,17 +29,25 @@ yaml = YAML()
 
 LOGGER = logging.getLogger(__name__)
 
-# Read the BIDS schema datatypes and entities
+# Read the BIDS schema data
+with (bidscoin.schemafolder/'objects'/'datatypes.yaml').open('r') as _stream:
+    bidsdatatypesdef = yaml.load(_stream)                                       # The valid BIDS datatypes, along with their full names and descriptions
 bidsdatatypes = {}
-for _datatypefile in (bidscoin.schemafolder/'datatypes').glob('*.yaml'):
-    with _datatypefile.open('r') as _stream:
-        bidsdatatypes[_datatypefile.stem] = yaml.load(_stream)
-with (bidscoin.schemafolder/'entities.yaml').open('r') as _stream:
-    entities = yaml.load(_stream)
+for _datatype in bidsdatatypesdef:
+    with (bidscoin.schemafolder/'rules'/'datatypes'/_datatype).with_suffix('.yaml').open('r') as _stream:
+        bidsdatatypes[_datatype] = yaml.load(_stream)                           # The entities that can/should be present for each BIDS datatype
+with (bidscoin.schemafolder/'objects'/'suffixes.yaml').open('r') as _stream:
+    suffixes = yaml.load(_stream)                                               # The descriptions of the valid BIDS file suffixes
+with (bidscoin.schemafolder/'objects'/'entities.yaml').open('r') as _stream:
+    entities = yaml.load(_stream)                                               # The descriptions of the entities present in BIDS filenames
+with (bidscoin.schemafolder/'rules'/'entities.yaml').open('r') as _stream:
+    entitiesorder = yaml.load(_stream)                                          # The order in which the entities should appear within filenames
+with (bidscoin.schemafolder/'objects'/'metadata.yaml').open('r') as _stream:
+    metadata = yaml.load(_stream)                                               # The descriptions of the valid BIDS metadata fields
 
 
 class DataSource:
-    def __init__(self, provenance: Union[str, Path]='', plugins: dict=None, dataformat: str='', datatype: str='', subprefix: str= 'sub-', sesprefix: str= 'ses-'):
+    def __init__(self, provenance: Union[str, Path]='', plugins: dict=None, dataformat: str='', datatype: str='', subprefix: str='', sesprefix: str=''):
         """
         A source datatype (e.g. DICOM or PAR) that can be converted to BIDS by the plugins
 
@@ -59,6 +69,14 @@ class DataSource:
             self.is_datasource()
         self.subprefix  = subprefix
         self.sesprefix  = sesprefix
+        self.metadata   = {}
+        jsonfile        = self.path.with_suffix('').with_suffix('.json') if self.path.name else self.path
+        if jsonfile.is_file():
+            with jsonfile.open('r') as json_fid:
+                self.metadata = json.load(json_fid)
+                if not isinstance(self.metadata, dict):
+                    LOGGER.warning(f"Skipping unexpectedly formatted meta-data in: {jsonfile}")
+                    self.metadata = {}
 
     def is_datasource(self) -> bool:
         """Returns True is the datasource has a valid dataformat"""
@@ -89,82 +107,99 @@ class DataSource:
         :return:        The property value (posix with a trailing "/" if tagname == 'filepath') or '' if the property could not be parsed from the datasource
         """
 
-        if tagname.startswith('filepath:') and len(tagname) > 9:
-            match = re.findall(tagname[9:], self.path.parent.as_posix() + '/')
-            if match:
-                if len(match) > 1:
-                    LOGGER.warning(f"Multiple matches {match} found when extracting {tagname} from {self.path.parent.as_posix() + '/'}, using: {match[-1]}")
-                return match[-1]                            # The last match is most likely the most informative
-        elif tagname == 'filepath':
-            return self.path.parent.as_posix() + '/'
+        try:
+            if tagname.startswith('filepath:') and len(tagname) > 9:
+                match = re.findall(tagname[9:], self.path.parent.as_posix() + '/')
+                if match:
+                    if len(match) > 1:
+                        LOGGER.warning(f"Multiple matches {match} found when extracting {tagname} from {self.path.parent.as_posix() + '/'}, using: {match[-1]}")
+                    return match[-1] if match else ''           # The last match is most likely the most informative
+            elif tagname == 'filepath':
+                return self.path.parent.as_posix() + '/'
 
-        if tagname.startswith('filename:') and len(tagname) > 9:
-            match = re.findall(tagname[9:], self.path.name)
-            if match:
-                if len(match) > 1:
-                    LOGGER.warning(f"Multiple matches {match} found when extracting {tagname} from {self.path.name}, using: {match[0]}")
-                return match[0]                             # The first match is most likely the most informative (?)
-        elif tagname == 'filename':
-            return self.path.name
+            if tagname.startswith('filename:') and len(tagname) > 9:
+                match = re.findall(tagname[9:], self.path.name)
+                if match:
+                    if len(match) > 1:
+                        LOGGER.warning(f"Multiple matches {match} found when extracting {tagname} from {self.path.name}, using: {match[0]}")
+                    return match[0] if match else ''            # The first match is most likely the most informative (?)
+            elif tagname == 'filename':
+                return self.path.name
 
-        if tagname == 'filesize' and self.path.is_file():
-            # Convert the size in bytes into a human-readable B, KB, MG, GB, TB format
-            size  = self.path.stat().st_size                # Size in bytes
-            power = 2 ** 10                                 # 2**10 = 1024
-            label = {0:'', 1:'k', 2:'M', 3:'G', 4:'T'}      # Standard labels for powers of 1024
-            n = 0                                           # The power/label index
-            while size > power and n < len(label):
-                size /= power
-                n += 1
-            return f"{size:.2f} {label[n]}B"
+            if tagname == 'filesize' and self.path.is_file():
+                # Convert the size in bytes into a human-readable B, KB, MG, GB, TB format
+                size  = self.path.stat().st_size                # Size in bytes
+                power = 2 ** 10                                 # 2**10 = 1024
+                label = {0:'', 1:'k', 2:'M', 3:'G', 4:'T'}      # Standard labels for powers of 1024
+                n = 0                                           # The power/label index
+                while size > power and n < len(label):
+                    size /= power
+                    n += 1
+                return f"{size:.2f} {label[n]}B"
 
-        if tagname == 'nrfiles' and self.path.is_file():
-            if run:                                         # Currently not used but keep the option open for future use
-                def match(file): return ((match_attribute(file.parent,         run['properties']['filepath']) or not run['properties']['filepath']) and
-                                         (match_attribute(file.name,           run['properties']['filename']) or not run['properties']['filename']) and
-                                         (match_attribute(file.stat().st_size, run['properties']['filesize']) or not run['properties']['filesize']))
-                return len([file for file in self.path.parent.glob('*') if match(file)])
-            else:
-                return len(list(self.path.parent.glob('*')))
+            if tagname == 'nrfiles' and self.path.is_file():
+                if run:                                         # Currently not used but keep the option open for future use
+                    def match(file): return ((match_runvalue(file.parent, run['properties']['filepath']) or not run['properties']['filepath']) and
+                                             (match_runvalue(file.name, run['properties']['filename']) or not run['properties']['filename']) and
+                                             (match_runvalue(file.stat().st_size, run['properties']['filesize']) or not run['properties']['filesize']))
+                    return len([file for file in self.path.parent.iterdir() if match(file)])
+                else:
+                    return len(list(self.path.parent.iterdir()))
+
+        except OSError as ioerror:
+            LOGGER.warning(f"{ioerror}")
 
         return ''
 
     def attributes(self, attributekey: str, validregexp: bool=False) -> str:
         """
-        Use the plugins to read and return the attribute value from the datasource
+        Read the attribute value from the json sidecar file if it is there, else use the plugins to read it from the datasource
 
-        :param attributekey: The attribute key for which a value is read from the datasource. A colon-separated regular expression can be appended to the attribute key (same as for the `filepath` and `filename` properties)
+        :param attributekey: The attribute key for which a value is read from the json-file or from the datasource. A colon-separated regular expression can be appended to the attribute key (same as for the `filepath` and `filename` properties)
         :param validregexp:  If True, the regexp meta-characters in the attribute value (e.g. '*') are replaced by '.',
-                             e.g. to prevent compile errors in match_attribute()
+                             e.g. to prevent compile errors in match_runvalue()
         :return:             The attribute value or '' if the attribute could not be read from the datasource. NB: values are always converted to strings
         """
 
-        if ':' in attributekey:
-            attributekey, pattern = attributekey.split(':', 1)
-        else:
-            pattern = ''
-        for plugin, options in self.plugins.items():
-            module = bidscoin.import_plugin(plugin, ('get_attribute',))
-            if module:
-                attributeval = module.get_attribute(self.dataformat, self.path, attributekey, options)
-                if attributeval is None:
-                    attributeval = ''
-                attributeval = str(attributeval)
-                if attributeval:
-                    if validregexp:
-                        try:            # Strip meta-characters to prevent match_attribute() errors
-                            re.compile(attributeval)
-                        except re.error:
-                            for metacharacter in ('.', '^', '$', '*', '+', '?', '{', '}', '[', ']', '\\', '|', '(', ')'):
-                                attributeval = attributeval.strip().replace(metacharacter, '.')
-                    if pattern:
-                        match = re.findall(pattern, attributeval)
-                        if len(match)>1:
-                            LOGGER.warning(f"Multiple matches {match} found when extracting {pattern} from {attributeval}, using: {match[0]}")
-                        attributeval = match[0]     # The first match is most likely the most informative (?)
+        attributeval = ''
 
-                    return attributeval
-        return ''
+        try:
+            # Split off the regular expression pattern
+            if ':' in attributekey:
+                attributekey, pattern = attributekey.split(':', 1)
+            else:
+                pattern = ''
+
+            # Read the attribute value from the sidecar file or from the datasource
+            if attributekey in self.metadata:
+                attributeval = str(self.metadata[attributekey]) if self.metadata[attributekey] is not None else ''
+            else:
+                for plugin, options in self.plugins.items():
+                    module = bidscoin.import_plugin(plugin, ('get_attribute',))
+                    if module:
+                        attributeval = module.get_attribute(self.dataformat, self.path, attributekey, options)
+                        attributeval = str(attributeval) if attributeval is not None else ''
+                    if attributeval:
+                        break
+
+            # Apply the regular expression to the attribute value
+            if attributeval:
+                if validregexp:
+                    try:            # Strip meta-characters to prevent match_runvalue() errors
+                        re.compile(attributeval)
+                    except re.error:
+                        for metacharacter in ('.', '^', '$', '*', '+', '?', '{', '}', '[', ']', '\\', '|', '(', ')'):
+                            attributeval = attributeval.strip().replace(metacharacter, '.')
+                if pattern:
+                    match = re.findall(pattern, attributeval)
+                    if len(match) > 1:
+                        LOGGER.warning(f"Multiple matches {match} found when extracting {pattern} from {attributeval}, using: {match[0]}")
+                    attributeval = match[0] if match else ''    # The first match is most likely the most informative (?)
+
+        except OSError as ioerror:
+            LOGGER.warning(f"{ioerror}")
+
+        return attributeval
 
     def subid_sesid(self, subid: str=None, sesid: str=None) -> Tuple[str, str]:
         """
@@ -173,7 +208,7 @@ class DataSource:
         :param subid:   The subject identifier, i.e. name of the subject folder (e.g. 'sub-001' or just '001') or a dynamic source attribute.
                         Can be left empty / None to use the default <<filepath:regexp>> extraction
         :param sesid:   The optional session identifier, same as subid
-        :return:        Updated (subid, sesid) tuple, including the BIDS-compliant sub-/ses-prefix
+        :return:        Updated (subid, sesid) tuple, including the BIDS-compliant 'sub-'/'ses-' prefixes
         """
 
         # Add the default value for subid and sesid if not given
@@ -191,9 +226,9 @@ class DataSource:
         subid = subid_
 
         # Add sub- and ses- prefixes if they are not there
-        subid = 'sub-' + cleanup_value(re.sub(f'^{self.subprefix}', '', subid))
+        subid = 'sub-' + cleanup_value(re.sub(f"^{self.subprefix if self.subprefix!='*' else ''}", '', subid))
         if sesid:
-            sesid = 'ses-' + cleanup_value(re.sub(f'^{self.sesprefix}', '', sesid))
+            sesid = 'ses-' + cleanup_value(re.sub(f"^{self.sesprefix if self.sesprefix!='*' else ''}", '', sesid))
 
         return subid, sesid
 
@@ -233,16 +268,14 @@ class DataSource:
         return value
 
 
-def unpack(sourcefolder: Path, subprefix: str, sesprefix: str, wildcard: str='*', workfolder: Path='') -> (Path, bool):
+def unpack(sourcefolder: Path, wildcard: str='*', workfolder: Path='') -> (List[Path], bool):
     """
     Unpacks and sorts DICOM files in sourcefolder to a temporary folder if sourcefolder contains a DICOMDIR file or .tar.gz, .gz or .zip files
 
     :param sourcefolder:    The full pathname of the folder with the source data
-    :param subprefix:       The subprefix (e.g. 'sub-'). Used to parse the subid
-    :param sesprefix:       The sesprefix (e.g. 'ses-'). Used to parse the sesid
     :param wildcard:        A glob search pattern to select the tarballed/zipped files
     :param workfolder:      A root folder for temporary data
-    :return:                A tuple with the full pathname of the source or workfolder and a workdir-path or False when the data is not unpacked in a temporary folder
+    :return:                Either ([unpacked and sorted session folders], True), or ([sourcefolder], False)
     """
 
     # Search for zipped/tarballed files
@@ -252,47 +285,44 @@ def unpack(sourcefolder: Path, subprefix: str, sesprefix: str, wildcard: str='*'
     packedfiles.extend(sourcefolder.glob(f"{wildcard}.tar.bz2"))
     packedfiles.extend(sourcefolder.glob(f"{wildcard}.zip"))
 
-#    # Check if we are going to do unpacking and/or sorting
-#    if packedfiles or (sourcefolder/'DICOMDIR').is_file():
-#
-#        # Create a (temporary) sub/ses workfolder for unpacking the data
-#        if not workfolder:
-#            workfolder = tempfile.mkdtemp()
-#        workfolder   = Path(workfolder)
-#        subid, sesid = DataSource(sourcefolder/'dum.my', subprefix=subprefix, sesprefix=sesprefix).subid_sesid()
-#        subid, sesid = subid.replace('sub-', subprefix), sesid.replace('ses-', sesprefix)
-#        worksubses   = workfolder/subid/sesid
-#        worksubses.mkdir(parents=True, exist_ok=True)
-#
-#        # Copy everything over to the workfolder
-#        LOGGER.info(f"Making temporary copy: {sourcefolder} -> {worksubses}")
-#        copy_tree(str(sourcefolder), str(worksubses))     # Older python versions don't support PathLib
-#
-#        # Unpack the zip/tarballed files in the temporary folder
-#        sessions = []
-#        for packedfile in [worksubses/packedfile.name for packedfile in packedfiles]:
-#            LOGGER.info(f"Unpacking: {packedfile.name} -> {worksubses}")
-#            ext = packedfile.suffixes
-#            if ext[-1] == '.zip':
-#                with zipfile.ZipFile(packedfile, 'r') as zip_fid:
-#                    zip_fid.extractall(worksubses)
-#            elif '.tar' in ext:
-#                with tarfile.open(packedfile, 'r') as tar_fid:
-#                    tar_fid.extractall(worksubses)
-#
-#            # Sort the DICOM files immediately (to avoid name collisions)
-#            sessions += dicomsort.sortsessions(worksubses)
-#
-#        # Sort the DICOM files if not sorted yet (e.g. DICOMDIR)
-#        sessions = set(sessions + dicomsort.sortsessions(worksubses))
-#        if len(sessions) > 1:
-#            LOGGER.warning(f"Multiple subject/session folders found in {sourcefolder}:\n{sessions}")
-#
-#        return worksubses, workfolder
-#
-#    else:
-#
-    return sourcefolder, False
+    # Check if we are going to do unpacking and/or sorting
+    if packedfiles or (sourcefolder/'DICOMDIR').is_file():
+
+        # Create a (temporary) sub/ses workfolder for unpacking the data
+        if not workfolder:
+            workfolder = Path(tempfile.mkdtemp(prefix="/blue/vabfmc/data/.Ingestion/TEMPS/.dicomsort"))
+        else:
+            workfolder = Path(workfolder)/next(tempfile._get_candidate_names())
+        worksubses = workfolder/sourcefolder.relative_to(sourcefolder.parent.parent)     # = workfolder/raw/sub/ses
+        worksubses.mkdir(parents=True, exist_ok=True)
+
+        # Copy everything over to the workfolder
+        LOGGER.info(f"Making temporary copy: {sourcefolder} -> {worksubses}")
+        copy_tree(str(sourcefolder), str(worksubses))     # Older python versions don't support PathLib
+
+        # Unpack the zip/tarballed files in the temporary folder
+        sessions = []
+        for packedfile in [worksubses/packedfile.name for packedfile in packedfiles]:
+            LOGGER.info(f"Unpacking: {packedfile.name} -> {worksubses}")
+            ext = packedfile.suffixes
+            if ext[-1] == '.zip':
+                with zipfile.ZipFile(packedfile, 'r') as zip_fid:
+                    zip_fid.extractall(worksubses)
+            elif '.tar' in ext:
+                with tarfile.open(packedfile, 'r') as tar_fid:
+                    tar_fid.extractall(worksubses)
+
+            # Sort the DICOM files immediately (to avoid name collisions)
+            sessions += dicomsort.sortsessions(worksubses)
+
+        # Sort the DICOM files if not sorted yet (e.g. DICOMDIR)
+        sessions = list(set(sessions + dicomsort.sortsessions(worksubses)))
+
+        return sessions, True
+
+    else:
+
+        return [sourcefolder], False
 
 
 def is_dicomfile(file: Path) -> bool:
@@ -343,10 +373,15 @@ def is_parfile(file: Path) -> bool:
     """
 
     # TODO: Implement a proper check, e.g. using nibabel
-    if file.is_file() and file.suffix.lower() in ('.par', '.xml'):
-        return True
-    else:
-        return False
+    try:
+        if file.is_file() and file.suffix.lower() == '.par' and '# CLINICAL TRYOUT' in file.read_text():
+            return True
+        elif file.is_file() and file.suffix.lower() == '.xml':
+            return True
+    except (OSError, UnicodeDecodeError) as ioerror:
+        pass
+
+    return False
 
 
 def get_dicomfile(folder: Path, index: int=0) -> Path:
@@ -469,8 +504,6 @@ def get_dicomfield(tagname: str, dicomfile: Path) -> Union[str, int]:
         try:
             if dicomfile != _DICOMFILE_CACHE:
                 dicomdata = dcmread(dicomfile, force=True)          # The DICM tag may be missing for anonymized DICOM files
-                if 'Modality' not in dicomdata:
-                    raise ValueError(f'Cannot read {dicomfile}')
                 _DICOMDICT_CACHE = dicomdata
                 _DICOMFILE_CACHE = dicomfile
             else:
@@ -488,11 +521,15 @@ def get_dicomfield(tagname: str, dicomfile: Path) -> Union[str, int]:
                         value = elem.value
                         break
 
-        except OSError:
-            LOGGER.warning(f'Cannot read {tagname} from {dicomfile}')
+            if not value and value!=0 and 'Modality' not in dicomdata:
+                raise ValueError(f"Missing mandatory DICOM 'Modality' field in: {dicomfile}")
+
+        except OSError as ioerror:
+            LOGGER.warning(f"Cannot read {tagname} from {dicomfile}\n{ioerror}")
             value = ''
 
         except Exception as dicomerror:
+            LOGGER.warning(f"Could not read {tagname} from {dicomfile}\n{dicomerror}")
             try:
                 value = parse_x_protocol(tagname, dicomfile)
 
@@ -665,12 +702,15 @@ def get_sparfield(tagname: str, sparfile: Path) -> Union[str, int]:
 
             value = hdr.get(tagname, '')
 
+        except ImportError:
+            LOGGER.warning(f"The extra `spec2nii` library could not be found or was not installed (see the BIDScoin install instructions)")
+
         except OSError:
-            LOGGER.warning(f'Cannot read {tagname} from {sparfile}')
+            LOGGER.warning(f"Cannot read {tagname} from {sparfile}")
             value = ''
 
         except Exception as sparerror:
-            LOGGER.warning(f'Could not parse {tagname} from {sparfile}\n{sparerror}')
+            LOGGER.warning(f"Could not parse {tagname} from {sparfile}\n{sparerror}")
             value = ''
 
     # Cast the dicom datatype to int or str (i.e. to something that yaml.dump can handle)
@@ -720,6 +760,9 @@ def get_p7field(tagname: str, p7file: Path) -> Union[str, int]:
                 except UnicodeDecodeError:
                     pass
 
+        except ImportError:
+            LOGGER.warning(f"The extra `spec2nii` library could not be found or was not installed (see the BIDScoin install instructions)")
+
         except OSError:
             LOGGER.warning(f'Cannot read {tagname} from {p7file}')
             value = ''
@@ -740,7 +783,7 @@ def get_p7field(tagname: str, p7file: Path) -> Union[str, int]:
 # ---------------- All function below this point are bidsmap related. TODO: make a class out of them -------------------
 
 
-def load_bidsmap(yamlfile: Path, folder: Path=Path(), report: Union[bool,None]=True) -> Tuple[dict, Path]:
+def load_bidsmap(yamlfile: Path, folder: Path=Path(), plugins:Union[tuple,list]=(), report: Union[bool,None]=True) -> Tuple[dict, Path]:
     """
     Read the mapping heuristics from the bidsmap yaml-file. If yamlfile is not fullpath, then 'folder' is first searched before
     the default 'heuristics'. If yamfile is empty, then first 'bidsmap.yaml' is searched for, then 'bidsmap_template'. So fullpath
@@ -750,12 +793,13 @@ def load_bidsmap(yamlfile: Path, folder: Path=Path(), report: Union[bool,None]=T
 
     :param yamlfile:    The full pathname or basename of the bidsmap yaml-file. If None, the default bidsmap_template file in the heuristics folder is used
     :param folder:      Only used when yamlfile=basename or None: yamlfile is then first searched for in folder and then falls back to the ./heuristics folder (useful for centrally managed template yaml-files)
+    :param plugins:     List of plugins to be used (with default options, overrules the plugin list in the study/template bidsmaps)
     :param report:      Report log.info when reading a file
     :return:            Tuple with (1) ruamel.yaml dict structure, with all options, BIDS mapping heuristics, labels and attributes, etc and (2) the fullpath yaml-file
     """
 
     # Input checking
-    if not folder.name:
+    if not folder.name or not folder.is_dir():
         folder = bidscoin.heuristicsfolder
     if not yamlfile.name:
         yamlfile = folder/'bidsmap.yaml'
@@ -799,10 +843,13 @@ def load_bidsmap(yamlfile: Path, folder: Path=Path(), report: Union[bool,None]=T
     # Make sure we get a proper plugin options and dataformat sections (use plugin default bidsmappings when a template bidsmap is loaded)
     if not bidsmap['Options'].get('plugins'):
         bidsmap['Options']['plugins'] = {}
-    for plugin, options in bidsmap['Options']['plugins'].items():
+    if plugins:
+        for plugin in [plugin for plugin in bidsmap['Options']['plugins'] if plugin not in plugins]:
+            del bidsmap['Options']['plugins'][plugin]
+    for plugin in plugins if plugins else bidsmap['Options']['plugins']:
         module = bidscoin.import_plugin(plugin)
         if not bidsmap['Options']['plugins'].get(plugin):
-            LOGGER.info(f"Adding default options from the {plugin} plugin")
+            LOGGER.info(f"Adding default bidsmap options from the {plugin} plugin")
             bidsmap['Options']['plugins'][plugin] = module.OPTIONS if 'OPTIONS' in dir(module) else {}
         if 'BIDSMAP' in dir(module) and yamlfile.parent == bidscoin.heuristicsfolder:
             for dataformat, bidsmappings in module.BIDSMAP.items():
@@ -811,7 +858,9 @@ def load_bidsmap(yamlfile: Path, folder: Path=Path(), report: Union[bool,None]=T
                     bidsmap[dataformat] = bidsmappings
 
     # Add missing provenance info, run dictionaries and bids entities
-    run_ = get_run_()
+    run_      = get_run_()
+    subprefix = bidsmap['Options']['bidscoin'].get('subprefix','')
+    sesprefix = bidsmap['Options']['bidscoin'].get('sesprefix','')
     for dataformat in bidsmap:
         if dataformat in ('Options','PlugIns'): continue        # Handle legacy bidsmaps (-> 'PlugIns')
         if not bidsmap[dataformat]:             continue
@@ -821,7 +870,7 @@ def load_bidsmap(yamlfile: Path, folder: Path=Path(), report: Union[bool,None]=T
 
                 # Add missing provenance info
                 if not run.get('provenance'):
-                    run['provenance'] = str(Path(f"sub-unknown/ses-unknown/{dataformat}_{datatype}_id{index+1:03}"))
+                    run['provenance'] = str(Path(f"{subprefix.replace('*','')}-unknown/{sesprefix.replace('*','')}-unknown/{dataformat}_{datatype}_id{index+1:03}"))
 
                 # Add missing run dictionaries (e.g. "meta" or "properties")
                 for key, val in run_.items():
@@ -829,9 +878,7 @@ def load_bidsmap(yamlfile: Path, folder: Path=Path(), report: Union[bool,None]=T
                         run[key] = val
 
                 # Add a DataSource object
-                run['datasource'] = DataSource(run['provenance'], bidsmap['Options']['plugins'], dataformat, datatype,
-                                               bidsmap['Options']['bidscoin'].get('subprefix','sub-'),
-                                               bidsmap['Options']['bidscoin'].get('sesprefix','ses-'))
+                run['datasource'] = DataSource(run['provenance'], bidsmap['Options']['plugins'], dataformat, datatype, subprefix, sesprefix)
 
                 # Add missing bids entities
                 for typegroup in bidsdatatypes.get(datatype,[]):
@@ -839,7 +886,7 @@ def load_bidsmap(yamlfile: Path, folder: Path=Path(), report: Union[bool,None]=T
                         for entityname in typegroup['entities']:
                             entitykey = entities[entityname]['entity']
                             if entitykey not in run['bids'] and entitykey not in ('sub','ses'):
-                                LOGGER.debug(f"Adding missing {dataformat}/{datatype} entity key: {entitykey}")
+                                LOGGER.info(f"Adding missing {dataformat}>{datatype}>{run['bids']['suffix']} bidsmap entity key: {entitykey}")
                                 run['bids'][entitykey] = ''
 
     # Validate the bidsmap entries
@@ -1004,8 +1051,8 @@ def get_run_(provenance: Union[str, Path]='', dataformat: str='', datatype: str=
 
     if bidsmap:
         plugins    = bidsmap['Options']['plugins']
-        subprefix  = bidsmap['Options']['bidscoin']['subprefix']
-        sesprefix  = bidsmap['Options']['bidscoin']['sesprefix']
+        subprefix  = bidsmap['Options']['bidscoin'].get('subprefix','')
+        sesprefix  = bidsmap['Options']['bidscoin'].get('sesprefix','')
         datasource = DataSource(provenance, plugins, dataformat, datatype, subprefix, sesprefix)
     else:
         datasource = DataSource(provenance, dataformat=dataformat, datatype=datatype)
@@ -1039,8 +1086,8 @@ def get_run(bidsmap: dict, datatype: str, suffix_idx: Union[int, str], datasourc
             # Get a clean run (remove comments to avoid overly complicated commentedMaps from ruamel.yaml)
             run_ = get_run_(datasource.path, bidsmap=bidsmap)
 
-            for filekey, filevalue in run['properties'].items():
-                run_['properties'][filekey] = filevalue
+            for propkey, propvalue in run['properties'].items():
+                run_['properties'][propkey] = propvalue
 
             for attrkey, attrvalue in run['attributes'].items():
                 if datasource.path.name:
@@ -1200,18 +1247,18 @@ def update_bidsmap(bidsmap: dict, source_datatype: str, run: dict, clean: bool=T
         LOGGER.exception(f"Number of runs in bidsmap['{dataformat}'] changed unexpectedly: {num_runs_in} -> {num_runs_out}")
 
 
-def match_attribute(attribute, pattern) -> bool:
+def match_runvalue(attribute, pattern) -> bool:
     """
     Match the value items with the attribute string using regexp. If both attribute
     and values are a list then they are directly compared as is, else they are converted
     to a string
 
     Examples:
-        match_attribute('my_pulse_sequence_name', 'filename')   -> False
-        match_attribute([1,2,3], [1,2,3])                       -> True
-        match_attribute([1,2,3], '[1, 2, 3]')                   -> True
-        match_attribute('my_pulse_sequence_name', '^my.*name$') -> True
-        match_attribute('T1_MPRage', '(?i).*(MPRAGE|T1w).*'     -> True
+        match_runvalue('my_pulse_sequence_name', 'filename')   -> False
+        match_runvalue([1,2,3], [1,2,3])                       -> True
+        match_runvalue([1,2,3], '[1, 2, 3]')                   -> True
+        match_runvalue('my_pulse_sequence_name', '^my.*name$') -> True
+        match_runvalue('T1_MPRage', '(?i).*(MPRAGE|T1w).*'     -> True
 
     :param attribute:   The long string that is being searched in (e.g. a DICOM attribute)
     :param pattern:     A re.fullmatch regular expression pattern
@@ -1275,7 +1322,7 @@ def exist_run(bidsmap: dict, datatype: str, run_item: dict, matchbidslabels: boo
         for matching in ('properties', 'attributes'):
             for itemkey, itemvalue in run_item[matching].items():
                 value = run[matching].get(itemkey)          # Matching bids-labels which exist in one datatype but not in the other -> None
-                match = match and match_attribute(itemvalue, value)
+                match = match and match_runvalue(itemvalue, value)
                 if not match:
                     break                                   # There is no point in searching further within the run_item now that we've found a mismatch
 
@@ -1361,20 +1408,20 @@ def check_run(datatype: str, run: dict, validate: bool=False) -> bool:
     return run_found and run_valsok and run_keysok
 
 
-def get_matching_run(datasource: DataSource, bidsmap: dict, runtime=False) -> Tuple[dict, Union[int, None]]:
+def get_matching_run(datasource: DataSource, bidsmap: dict, runtime=False) -> Tuple[dict, bool]:
     """
     Find the first run in the bidsmap with properties and file attributes that match with the data source, and then
-    through the attributes. The datatypes are searcher for in this order:
+    through the attributes. The datatypes are searched for in this order:
 
     ignoredatatypes + bidscoindatatypes + unknowndatatypes
 
     Then update/fill the provenance, and the (dynamic) bids and meta values (bids values are cleaned-up to be BIDS-valid)
 
-    :param datasource:  The data source from which the attributes are read
+    :param datasource:  The data source from which the attributes are read. NB: The datasource.datatype attribute is updated
     :param bidsmap:     Full bidsmap data structure, with all options, BIDS keys and attributes, etc
     :param runtime:     Dynamic <<values>> are expanded if True
-    :return:            (run, datatype, index) The matching and filled-in / cleaned run item, datatype and list index as in run = bidsmap[dataformat][datatype][index]
-                        datatype = unknowndatatypes and index = None if there is no match, the run is still populated with info from the source-file
+    :return:            (run, match) The matching and filled-in / cleaned run item, datatype, and True if there is a match
+                        If there is no match then the run is still populated with info from the source-file
     """
 
     bidscoindatatypes = bidsmap['Options']['bidscoin'].get('datatypes',[])
@@ -1385,24 +1432,23 @@ def get_matching_run(datasource: DataSource, bidsmap: dict, runtime=False) -> Tu
     run_ = get_run_(datasource.path, dataformat=datasource.dataformat, bidsmap=bidsmap)
     for datatype in ignoredatatypes + bidscoindatatypes + unknowndatatypes:         # The datatypes in which a matching run is searched for
 
-        runs = bidsmap.get(datasource.dataformat, {}).get(datatype, [])
-        if not runs:
-            runs = []
-        for index, run in enumerate(runs):
+        runs                = bidsmap.get(datasource.dataformat, {}).get(datatype, [])
+        datasource.datatype = datatype
+        for run in runs if runs else []:
 
             match = any([run[matching][attrkey] not in [None,''] for matching in ('properties','attributes') for attrkey in run[matching]])     # Normally match==True, but make match==False if all attributes are empty
-            run_ = get_run_(datasource.path, dataformat=datasource.dataformat, datatype=datatype, bidsmap=bidsmap)
+            run_  = get_run_(datasource.path, dataformat=datasource.dataformat, datatype=datatype, bidsmap=bidsmap)
 
             # Try to see if the sourcefile matches all of the filesystem properties
-            for filekey, filevalue in run['properties'].items():
+            for propkey, propvalue in run['properties'].items():
 
                 # Check if the attribute value matches with the info from the sourcefile
-                if filevalue:
-                    sourcevalue = datasource.properties(filekey)
-                    match       = match and match_attribute(sourcevalue, filevalue)
+                if propvalue:
+                    sourcevalue = datasource.properties(propkey)
+                    match       = match and match_runvalue(sourcevalue, propvalue)
 
                 # Don not fill the empty attribute with the info from the sourcefile but keep the matching expression
-                run_['properties'][filekey] = filevalue
+                run_['properties'][propkey] = propvalue
 
             # Try to see if the sourcefile matches all of the attributes and fill all of them
             for attrkey, attrvalue in run['attributes'].items():
@@ -1410,7 +1456,7 @@ def get_matching_run(datasource: DataSource, bidsmap: dict, runtime=False) -> Tu
                 # Check if the attribute value matches with the info from the sourcefile
                 sourcevalue = datasource.attributes(attrkey, validregexp=True)
                 if attrvalue:
-                    match = match and match_attribute(sourcevalue, attrvalue)
+                    match = match and match_runvalue(sourcevalue, attrvalue)
 
                 # Fill the empty attribute with the info from the sourcefile
                 run_['attributes'][attrkey] = sourcevalue
@@ -1437,17 +1483,16 @@ def get_matching_run(datasource: DataSource, bidsmap: dict, runtime=False) -> Tu
                     run_['meta'][metakey] = datasource.dynamicvalue(metavalue, cleanup=False, runtime=runtime)
 
             # Copy the DataSource object
-            if 'datasource' in run:
-                run_['datasource']      = copy.deepcopy(run['datasource'])
-                run_['datasource'].path = datasource.path
+            run_['datasource']      = copy.deepcopy(run['datasource'])
+            run_['datasource'].path = datasource.path
 
             # Stop searching the bidsmap if we have a match
             if match:
-                return run_, index
+                return run_, True
 
     # We don't have a match (all tests failed, so datatype should be the *last* one, e.g. unknowndatatype)
-    LOGGER.debug(f"Could not find a matching run in the bidsmap for {datasource.path} -> {datatype}")
-    return run_, None
+    LOGGER.debug(f"Could not find a matching run in the bidsmap for {datasource.path} -> {ignoredatatypes + bidscoindatatypes} -> {unknowndatatypes}")
+    return run_, False
 
 
 def get_derivatives(datatype: str) -> list:
@@ -1487,7 +1532,7 @@ def get_bidsname(subid: str, sesid: str, run: dict, runtime: bool=False, cleanup
 
     # Compose a bidsname from valid BIDS entities only
     bidsname = f"sub-{subid}{add_prefix('_ses-', sesid)}"                       # Start with the subject/session identifier
-    for entitykey in [entities[entity]['entity'] for entity in entities]:
+    for entitykey in [entities[entity]['entity'] for entity in entitiesorder]:
         bidsvalue = run['bids'].get(entitykey)                                  # Get the entity data from the run
         if not bidsvalue:
             bidsvalue = ''
@@ -1507,7 +1552,7 @@ def get_bidsname(subid: str, sesid: str, run: dict, runtime: bool=False, cleanup
     return bidsname
 
 
-def get_bidsvalue(bidsfile: Union[str, Path], bidskey: str, newvalue: str='') -> Union[Path, str]:
+def get_bidsvalue(bidsfile: Union[str, Path], bidskey: str, newvalue='') -> Union[Path, str]:
     """
     Sets the bidslabel, i.e. '*_bidskey-*_' is replaced with '*_bidskey-bidsvalue_'. If the key is not in the bidsname
     then the newvalue is appended to the acquisition label. If newvalue is empty (= default), then the parsed existing
@@ -1630,6 +1675,39 @@ def increment_runindex(bidsfolder: Path, bidsname: str, ext: str='.*') -> Union[
     return bidsname
 
 
+def copymetadata(metasource: Path, metatarget: Path, extensions: list) -> dict:
+    """
+    Copies over or, in case of json-files, returns the content of 'metasource' data files
+
+    NB: In future versions this function could also support returning the content of e.g. csv- or Excel-files
+
+    :param metasource:  The filepath of the source-data file with associated / equally named meta-data files
+    :param metatarget:  The filepath of the source-data file to with the (non-json) meta-data files are copied over
+    :param extensions:  A list of file extensions of the meta-data files
+    :return:            The meta-data of the json-file
+    """
+
+    metadict = {}
+    for ext in extensions:
+        metasource = metasource.with_suffix('').with_suffix(ext)
+        metatarget = metatarget.with_suffix('').with_suffix(ext)
+        if metasource.is_file():
+            LOGGER.info(f"Copying source data from: '{metasource}''")
+            if ext == '.json':
+                with metasource.open('r') as json_fid:
+                    metadict = json.load(json_fid)
+                if not isinstance(metadict, dict):
+                    LOGGER.error(f"Skipping unexpectedly formatted meta-data in: {metasource}")
+                    metadict = {}
+            else:
+                if metatarget.is_file():
+                    LOGGER.warning(f"Deleting unexpected existing data-file: {metatarget}")
+                    metatarget.unlink()
+                shutil.copy2(metasource, metatarget)
+
+    return metadict
+
+
 def get_propertieshelp(propertieskey: str) -> str:
     """
     Reads the description of a matching attributes key in the source dictionary
@@ -1667,7 +1745,43 @@ def get_attributeshelp(attributeskey: str) -> str:
         return f"{attributeskey}\nThe DICOM '{datadict.dictionary_description(attributeskey)}' attribute"
 
     except ValueError:
-        return f"{attributeskey}\nA private key"
+        return f"{attributeskey}\nA private attribute"
+
+
+def get_datatypehelp(datatype: str) -> str:
+    """
+    Reads the description of the datatype in the schema/objects/datatypes.yaml file
+
+    :param datatype:    The datatype for which the help text is obtained
+    :return:            The obtained help text
+    """
+
+    if not datatype:
+        return "Please provide a datatype"
+
+    # Return the description for the datatype or a default text
+    if datatype in bidsdatatypesdef:
+        return f"{bidsdatatypesdef[datatype]['name']}\n{bidsdatatypesdef[datatype]['description']}"
+
+    return f"{datatype}\nA private datatype"
+
+
+def get_suffixhelp(suffix: str) -> str:
+    """
+    Reads the description of the suffix in the schema/objects/suffixes.yaml file
+
+    :param suffix:      The suffix for which the help text is obtained
+    :return:            The obtained help text
+    """
+
+    if not suffix:
+        return "Please provide a suffix"
+
+    # Return the description for the suffix or a default text
+    if suffix in suffixes:
+        return f"{suffixes[suffix]['name']}\n{suffixes[suffix]['description']}"
+
+    return f"{suffix}\nA private suffix"
 
 
 def get_entityhelp(entitykey: str) -> str:
@@ -1686,7 +1800,7 @@ def get_entityhelp(entitykey: str) -> str:
         if entities[entityname]['entity'] == entitykey:
             return f"{entities[entityname]['name']}\n{entities[entityname]['description']}"
 
-    return f"{entitykey}\nA private key"
+    return f"{entitykey}\nA private entity"
 
 
 def get_metahelp(metakey: str) -> str:
@@ -1701,14 +1815,12 @@ def get_metahelp(metakey: str) -> str:
         return "Please provide a key-name"
 
     # Return the description from the metadata file or a default text
-    metafile = bidscoin.schemafolder/'metadata'/(metakey + '.yaml')
-    if metafile.is_file():
-        with metafile.open('r') as stream:
-            metadata = yaml.load(stream)
+    if metakey in metadata:           # metadata[metaname]['name'] == metaname???
+        description = metadata[metakey]['description']
         if metakey == 'IntendedFor':    # IntendedFor is a special search-pattern field in BIDScoin
-            metadata['description'] += ('\nThese associated files can be dynamically searched for during'
-                                        '\nbidscoiner runtime with glob-style matching patterns such as'
-                                        '\n"<<Reward*_bold><Stop*_epi>>" (see the online documentation)')
-        return f"{metadata['name']}\n{metadata['description']}"
+            description += ('\nNB: These associated files can be dynamically searched for'
+                            '\nduring bidscoiner runtime with glob-style matching patterns,'
+                            '\n"such as <<Reward*_bold><Stop*_epi>>" (see documentation)')
+        return f"{metadata[metakey]['name']}\n{description}"
 
-    return f"{metakey}\nA private key"
+    return f"{metakey}\nA private meta key"
